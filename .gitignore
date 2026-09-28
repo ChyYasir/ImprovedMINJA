@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# OS
+.DS_Store
+
+# Secrets / local config — no API keys are checked into config/models.yaml
+# (ModelConfig.api_key is populated at runtime, e.g. from env vars), but guard
+# against anyone adding a local override file later.
+.env
+*.env.local
+config/*local*
+config/*secret*
+
+# Code-execution scratch dir (EHR/vendor/ehragent/coding/) — the agent's generated
+# code writes/reads temp files here at runtime; not source, not worth tracking.
+EHR/vendor/ehragent/coding/*
+!EHR/vendor/ehragent/coding/.gitkeep
+
+# Generated evaluation artifacts (search logs, memory JSONs, condition results) —
+# these are run outputs, regenerable from the harness/conditions code, not source.
+# Un-ignore specific result files later if you want to commit final reported results.
+EHR/data/*
+!EHR/data/.gitkeep
+
+# MIMIC-III derived data — deliberately excluded from this repo (clinical data;
+# already public in the upstream MINJA repo, but not re-published here on request).
+# See EHR/vendor/ehragent/ehrsql-ehragent/mimic_iii/README.md for how to populate this
+# directory locally before running anything that touches EHRAgent/MIMIC-III.
+EHR/vendor/ehragent/ehrsql-ehragent/mimic_iii/*
+!EHR/vendor/ehragent/ehrsql-ehragent/mimic_iii/README.md

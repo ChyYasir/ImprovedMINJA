@@ -1,0 +1,16 @@
+# Model configs — decisions finalized in Planning_docs/ImprovedMINJA_technical_implementation_plan.md §11
+target_llama:
+  name: meta-llama/Meta-Llama-3.1-8B-Instruct
+  api_base: https://api.deepinfra.com/v1/openai
+  protocol: openai-function-calling
+
+proposer_condition3:
+  name: mistralai/Mistral-Nemo-Instruct-2407
+  api_base: https://api.deepinfra.com/v1/openai
+  protocol: none   # no tool calling needed for this role — plain text generation only
+
+target_gpt4o_mini:
+  name: gpt-4o-mini
+  api_base: https://api.openai.com/v1
+  protocol: openai-function-calling
+  # deferred: added once the Llama arm is validated end to end
