@@ -1,11 +1,23 @@
 # Superset of MINJA/EHR's requirements.txt, for the vendored copy under vendor/ehragent/ (§5)
-pyautogen==0.2.0
+pyautogen==0.2.15
 # autogen==1.0.16 dropped: vendor code's API (ConversableAgent/UserProxyAgent/AssistantAgent with
 # legacy llm_config={"functions": [...]}) matches pyautogen 0.2.x, not the newer autogen/ag2 v0.4+
 # API. Pinning both was a redundant/conflicting pair in the original requirements.txt (§10).
+# Bumped from 0.2.0 (2026-09-28): 0.2.0 has no generate_tool_calls_reply at all, so it can
+# never route a DeepInfra tool_calls response to execute_function — confirmed via a live test
+# against Llama-3.1-8B-Instruct (see adapter/portable_agent.py's module docstring, point 3).
+# 0.2.15 is the EARLIEST version with generate_tool_calls_reply (confirmed by reading its
+# source that it routes through the same execute_function vendor's MedAgent already
+# implements). Deliberately not the latest 0.2.x: 0.2.35 also changed _append_oai_message()'s
+# signature (added a required is_sending arg), which broke medagent.py's own send() override
+# (a 2-arg call into that internal method) — confirmed by hitting that exact TypeError.
+# 0.2.15-0.2.18 all still have the old 2-arg signature; picked the earliest of those to
+# minimize version drift from 0.2.0 and reduce the chance of other such internal API breaks.
 jsonlines==3.1.0
 numpy==1.24.3
 openai==1.7.2
+httpx==0.27.2   # openai==1.7.2's internal client still passes proxies= to httpx.Client(),
+                # which httpx>=0.28 removed — pin an older, compatible httpx explicitly
 pandas==2.1.4
 python_Levenshtein==0.23.0
 termcolor==2.4.0
@@ -19,3 +31,4 @@ tiktoken
 
 # ImprovedMINJA's own new dependencies (§10)
 pyyaml
+python-dotenv

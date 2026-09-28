@@ -2,7 +2,10 @@
 target_llama:
   name: meta-llama/Meta-Llama-3.1-8B-Instruct
   api_base: https://api.deepinfra.com/v1/openai
-  protocol: openai-function-calling
+  protocol: openai-tool-calling
+  # NOT openai-function-calling: confirmed via a live test (2026-09-28) that DeepInfra's
+  # API only honors the modern tools/tool_choice schema, not the legacy functions= schema
+  # vendor/ehragent/config.py builds. See adapter/portable_agent.py's build_llm_config().
 
 proposer_condition3:
   name: mistralai/Mistral-Nemo-Instruct-2407

@@ -2,7 +2,7 @@
 
 See Planning_docs/ImprovedMINJA_technical_implementation_plan.md §5. Subclasses the vendored
 MedAgent (copied into vendor/ehragent/, not imported from MINJA/ — see §5's revised decision)
-to fix two things without editing the vendor copy's logic:
+to fix three things without editing the vendor copy's logic:
 
 1. retrieve_knowledge() constructs its own OpenAI() client with only api_key, no base_url
    (vendor/ehragent/medagent.py:91-93) — it can only ever reach OpenAI's real API regardless
@@ -11,6 +11,17 @@ to fix two things without editing the vendor copy's logic:
 2. The model isn't resolved from config.py's hardcoded allowlist (which only recognizes
    'gpt-4'/'gpt-4o' and silently falls back to 'o1-preview' otherwise) — ModelConfig is
    passed in explicitly instead.
+3. vendor/ehragent/config.py's llm_config_list() builds the legacy, deprecated `functions=`
+   request schema. Confirmed via a live test (2026-09-28) that this silently fails against
+   DeepInfra's Llama-3.1-8B-Instruct: the model returns plain text instead of a structured
+   call, since DeepInfra's API only documents/supports the modern `tools`/`tool_choice`
+   schema (their own docs show no `functions` example at all) and pyautogen's client does
+   zero functions->tools translation. build_llm_config() below branches on
+   ModelConfig.protocol and builds `tools=` instead for protocol="openai-tool-calling".
+   Required pyautogen>=0.2.35 (bumped from the originally-pinned 0.2.0), which is the first
+   version with generate_tool_calls_reply — confirmed by reading its source that it routes
+   tool_calls through the exact same execute_function() the vendor's MedAgent implements, so
+   no vendor code needed to change for this fix.
 """
 
 import sys
@@ -33,7 +44,11 @@ from medagent import MedAgent  # noqa: E402 (vendor import, path inserted above)
 @dataclass
 class ModelConfig:
     """name/api_base/api_key/protocol per plan §5. Config values come from config/models.yaml,
-    not from vendor/ehragent/config.py's openai_config() allowlist."""
+    not from vendor/ehragent/config.py's openai_config() allowlist.
+
+    protocol: "openai-function-calling" (legacy `functions=` schema — matches vendor/ehragent/
+    config.py's llm_config_list(), works against real OpenAI) or "openai-tool-calling" (modern
+    `tools=` schema — required for DeepInfra targets, see module docstring point 3)."""
 
     name: str
     api_key: str
@@ -48,6 +63,42 @@ class ModelConfig:
         if self.api_base:
             d["base_url"] = self.api_base
         return d
+
+
+# Same "python" function schema vendor/ehragent/config.py's llm_config_list() embeds under
+# `functions=` — kept here verbatim so build_llm_config() can wrap it in either schema without
+# poking into the vendor module's internals.
+_PYTHON_FUNCTION_SCHEMA = {
+    "name": "python",
+    "description": "run the entire code and return the execution result. Only generate the code.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "cell": {
+                "type": "string",
+                "description": "Valid Python code to execute.",
+            }
+        },
+        "required": ["cell"],
+    },
+}
+
+
+def build_llm_config(model_config: ModelConfig, seed: int) -> dict:
+    """Builds the AssistantAgent llm_config for model_config, choosing the request schema its
+    protocol needs (see ModelConfig docstring and module docstring point 3)."""
+    config_list = [model_config.as_config_dict()]
+    if model_config.protocol == "openai-tool-calling":
+        return {
+            "tools": [{"type": "function", "function": _PYTHON_FUNCTION_SCHEMA}],
+            "config_list": config_list,
+            "timeout": 120,
+            "cache_seed": seed,
+            "temperature": 0,
+        }
+    from config import llm_config_list  # vendor's own legacy builder, unmodified — noqa: E402
+
+    return llm_config_list(seed, config_list)
 
 
 class PortableMedAgent(MedAgent):

@@ -5,7 +5,8 @@ DeepInfra's OpenAI-compatible endpoint, PortableMedAgent.retrieve_knowledge()'s 
 (also routed through DeepInfra), and run_code() querying the real MIMIC-III data — plus the
 chdir-to-coding-dir fix confirmed necessary in the earlier manual test.
 
-Requires: export DEEPINFRA_API_KEY=...
+Requires: a .env file in this directory (EHR/.env, gitignored) with DEEPINFRA_API_KEY=...
+          — copy .env.example to .env and fill it in.
 Run with: .venv/bin/python harness/_smoke_test_deepinfra.py
 """
 import os
@@ -17,22 +18,24 @@ sys.path.insert(0, ".")
 sys.path.insert(0, "vendor/ehragent")
 
 import autogen
+from dotenv import load_dotenv
 
-from adapter.portable_agent import ModelConfig, PortableMedAgent
-from config import llm_config_list
+from adapter.portable_agent import ModelConfig, PortableMedAgent, build_llm_config
 from toolset_high import run_code
 
+load_dotenv()  # reads EHR/.env when run with CWD=EHR/, per the run instructions above
 api_key = os.environ.get("DEEPINFRA_API_KEY")
 if not api_key:
-    raise SystemExit("Set DEEPINFRA_API_KEY first: export DEEPINFRA_API_KEY=...")
+    raise SystemExit("DEEPINFRA_API_KEY not found. Copy .env.example to .env and fill it in.")
 
 model_config = ModelConfig(
     name="meta-llama/Meta-Llama-3.1-8B-Instruct",
     api_key=api_key,
     api_base="https://api.deepinfra.com/v1/openai",
+    protocol="openai-tool-calling",  # the fix: DeepInfra needs tools=, not legacy functions=
 )
 config_list = [model_config.as_config_dict()]
-llm_config = llm_config_list(seed=0, config_list=config_list)
+llm_config = build_llm_config(model_config, seed=0)
 
 chatbot = autogen.agentchat.AssistantAgent(
     name="chatbot",
@@ -49,7 +52,11 @@ user_proxy = PortableMedAgent(
     is_termination_msg=lambda x: x.get("content", "") and x.get("content", "").rstrip().endswith("TERMINATE"),
     human_input_mode="NEVER",
     max_consecutive_auto_reply=1,
-    code_execution_config={"work_dir": "coding"},
+    code_execution_config={"work_dir": "coding", "use_docker": False},
+    # use_docker: False — code actually executes via the vendor's own function_map={"python":
+    # run_code} path (exec() in-process, see toolset_high.py), never through AutoGen's own
+    # docker-based executor. pyautogen 0.2.35 added an init-time docker availability check
+    # regardless of which executor is actually used; this just satisfies that check.
     config_list=config_list,
 )
 user_proxy.register_function(function_map={"python": run_code})
