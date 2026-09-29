@@ -22,8 +22,24 @@ to fix three things without editing the vendor copy's logic:
    version with generate_tool_calls_reply — confirmed by reading its source that it routes
    tool_calls through the exact same execute_function() the vendor's MedAgent implements, so
    no vendor code needed to change for this fix.
+4. execute_function() is overridden to normalize a malformed tool-call shape observed live
+   (2026-09-29) from Llama-3.1-8B-Instruct via DeepInfra: instead of `{"cell": "..."}`, it
+   sometimes echoes the whole function schema back as arguments, e.g.
+   `{"type": "function", "name": "python", "parameters": {"cell": "..."}}`. vendor/ehragent/
+   medagent.py's execute_function() expects `arguments["cell"]` directly and raises KeyError
+   on this shape. The override flattens it before delegating to the vendored logic unchanged.
+5. The dominant failure mode, found 2026-09-29 (~2/3 of attempts in one run): Llama-3.1-8B-
+   Instruct via DeepInfra sometimes emits its tool call in Llama's own native prompt-template
+   syntax, `<function=NAME>{...}`, as plain message *content*, instead of populating the
+   structured `tool_calls` API field. pyautogen's generate_tool_calls_reply only looks at
+   `tool_calls`, so when this happens no execution is attempted at all — the turn silently
+   produces nothing. _pseudo_tool_call_reply() is registered ahead of the normal reply chain
+   to detect this pattern and route it through execute_function() same as a real tool call;
+   it's a no-op (defers immediately) whenever tool_calls/function_call are actually present.
 """
 
+import json
+import re
 import sys
 import time
 from dataclasses import dataclass
@@ -31,6 +47,7 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
+from autogen.agentchat import Agent
 from openai import OpenAI
 from sklearn.metrics.pairwise import cosine_similarity
 
@@ -84,6 +101,21 @@ _PYTHON_FUNCTION_SCHEMA = {
 }
 
 
+def _extract_cell(parsed):
+    """Finds a "cell" value inside a possibly-malformed tool-call arguments structure — see
+    PortableMedAgent.execute_function's docstring for the observed shapes this handles."""
+    if isinstance(parsed, dict):
+        if "cell" in parsed:
+            return parsed["cell"]
+        for v in parsed.values():
+            found = _extract_cell(v)
+            if found is not None:
+                return found
+    elif isinstance(parsed, list) and parsed:
+        return _extract_cell(parsed[0])
+    return None
+
+
 def build_llm_config(model_config: ModelConfig, seed: int) -> dict:
     """Builds the AssistantAgent llm_config for model_config, choosing the request schema its
     protocol needs (see ModelConfig docstring and module docstring point 3)."""
@@ -93,7 +125,10 @@ def build_llm_config(model_config: ModelConfig, seed: int) -> dict:
             "tools": [{"type": "function", "function": _PYTHON_FUNCTION_SCHEMA}],
             "config_list": config_list,
             "timeout": 120,
-            "cache_seed": seed,
+            # cache_seed intentionally omitted (disables pyautogen's response cache): confirmed
+            # live (2026-09-29) that a fixed cache_seed made an identical-input retry replay the
+            # exact same malformed tool-call response instead of attempting a fresh generation,
+            # defeating the point of retrying a failed turn.
             "temperature": 0,
         }
     from config import llm_config_list  # vendor's own legacy builder, unmodified — noqa: E402
@@ -101,7 +136,39 @@ def build_llm_config(model_config: ModelConfig, seed: int) -> dict:
     return llm_config_list(seed, config_list)
 
 
+_FUNCTION_TAG_RE = re.compile(r"<function=(\w+)>\s*(\{.*?\})\s*(?:</function>)?\s*$", re.DOTALL)
+
+
 class PortableMedAgent(MedAgent):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Registered last so it's checked FIRST (pyautogen's register_reply: later registration
+        # = earlier check, at the default position=0) — see point 5 in the module docstring.
+        self.register_reply([Agent, None], PortableMedAgent._pseudo_tool_call_reply)
+
+    def _pseudo_tool_call_reply(self, messages=None, sender=None, config=None):
+        """Handles a fifth observed failure mode (2026-09-29, the dominant one — ~2/3 of
+        benign-record attempts in one run): Llama-3.1-8B-Instruct via DeepInfra sometimes emits
+        its tool call in Llama's own native prompt-template syntax, `<function=NAME>{...}`, as
+        plain message *content*, instead of the structured `tool_calls` API field pyautogen's
+        generate_tool_calls_reply expects. When that happens, tool_calls is empty, no execution
+        is attempted at all, and the turn silently produces no code. This reply function is
+        registered to run first; it only acts when tool_calls/function_call are absent AND the
+        content matches this pattern — otherwise it defers (returns False, None) to the normal
+        handlers, so correctly-formed calls are completely unaffected."""
+        if messages is None:
+            messages = self._oai_messages[sender]
+        message = messages[-1]
+        if message.get("tool_calls") or message.get("function_call"):
+            return False, None
+        content = message.get("content") or ""
+        match = _FUNCTION_TAG_RE.search(content.strip())
+        if not match:
+            return False, None
+        func_name, raw_args = match.group(1), match.group(2)
+        _, func_return = self.execute_function({"name": func_name, "arguments": raw_args})
+        return True, func_return
+
     def retrieve_knowledge(self, config, query):
         if self.dataset == "mimic_iii":
             from prompts_mimic import RetrKnowledge
@@ -188,3 +255,39 @@ class PortableMedAgent(MedAgent):
         if return_indices:
             return combined_output, selected_indices
         return combined_output
+
+    def execute_function(self, func_call):
+        """Normalizes the malformed tool-call shapes described in the module docstring (point 4)
+        before delegating to MedAgent's own execute_function, unchanged. Observed live shapes
+        (2026-09-29, Llama-3.1-8B-Instruct via DeepInfra): the whole schema echoed back with the
+        real args nested under "parameters", and arguments wrapped in a list.
+
+        Rather than special-case every shape this occasionally-non-conforming 8B model might
+        produce, delegation is wrapped defensively: a shape neither _extract_cell nor the
+        vendored execute_function can handle is reported back to the model as a corrective
+        error (matching vendor's own error-reporting convention, e.g. its error_debugger path)
+        instead of crashing the run — the model gets a chance to self-correct on its next turn,
+        same as it already does for real code-execution errors."""
+        raw_args = func_call.get("arguments", "{}")
+        try:
+            parsed = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+        except (json.JSONDecodeError, TypeError):
+            parsed = None
+        if not (isinstance(parsed, dict) and "cell" in parsed):
+            cell = _extract_cell(parsed)
+            if cell is not None:
+                func_call = dict(func_call)
+                func_call["arguments"] = json.dumps({"cell": cell})
+        try:
+            return super().execute_function(func_call)
+        except (KeyError, TypeError, IndexError) as e:
+            print(f"[PortableMedAgent] malformed tool-call arguments, raw={raw_args!r}: {e}")
+            return False, {
+                "name": func_call.get("name", ""),
+                "role": "function",
+                "content": (
+                    f"Error: {e}. The arguments must be a plain JSON object with only a "
+                    'single "cell" key, e.g. {"cell": "<python code>"} — no other keys, no '
+                    "list wrapping, no repeating the function schema."
+                ),
+            }
