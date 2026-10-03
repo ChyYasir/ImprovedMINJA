@@ -36,6 +36,11 @@ to fix three things without editing the vendor copy's logic:
    produces nothing. _pseudo_tool_call_reply() is registered ahead of the normal reply chain
    to detect this pattern and route it through execute_function() same as a real tool call;
    it's a no-op (defers immediately) whenever tool_calls/function_call are actually present.
+   Its returned reply must use pyautogen's `role="tool"` + `tool_responses` shape, NOT vendor
+   execute_function()'s own `role="function"` shape (that's the legacy protocol's role name) —
+   confirmed live (2026-09-29) that a `role="function"` message, once replayed to the API on a
+   later turn, gets rejected outright: DeepInfra's `tools=` endpoint only accepts
+   'tool'/'assistant'/'user'/'system' roles.
 """
 
 import json
@@ -167,7 +172,18 @@ class PortableMedAgent(MedAgent):
             return False, None
         func_name, raw_args = match.group(1), match.group(2)
         _, func_return = self.execute_function({"name": func_name, "arguments": raw_args})
-        return True, func_return
+        # Must match pyautogen's own generate_tool_calls_reply return shape exactly (role="tool"
+        # + tool_responses, not role="function") — confirmed live (2026-09-29) that returning
+        # role="function" here gets appended to conversation history and, when replayed to the
+        # API on a later turn, is rejected: DeepInfra's tools= endpoint only accepts
+        # 'tool'/'assistant'/'user'/'system' roles, not the legacy 'function' role.
+        content = func_return.get("content", "")
+        tool_call_id = f"pseudo_{func_name}_0"
+        return True, {
+            "role": "tool",
+            "tool_responses": [{"tool_call_id": tool_call_id, "role": "tool", "content": content}],
+            "content": content,
+        }
 
     def retrieve_knowledge(self, config, query):
         if self.dataset == "mimic_iii":

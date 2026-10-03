@@ -1,5 +1,5 @@
 """Manual smoke test for retrieval_metrics.py and precheck.py — no API key needed.
-Run with: .venv/bin/python harness/_manual_test_phase1.py
+Run with: .venv/bin/python tests/test_retrieval_and_precheck.py
 """
 import sys
 import warnings

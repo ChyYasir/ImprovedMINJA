@@ -5,9 +5,10 @@ DeepInfra's OpenAI-compatible endpoint, PortableMedAgent.retrieve_knowledge()'s 
 (also routed through DeepInfra), and run_code() querying the real MIMIC-III data — plus the
 chdir-to-coding-dir fix confirmed necessary in the earlier manual test.
 
-Requires: a .env file in this directory (EHR/.env, gitignored) with DEEPINFRA_API_KEY=...
-          — copy .env.example to .env and fill it in.
-Run with: .venv/bin/python harness/_smoke_test_deepinfra.py
+Requires: a .env file in EHR/ (gitignored) with DEEPINFRA_API_KEY=... — copy .env.example to
+          .env and fill it in.
+Run with (from EHR/, so CWD is correct — this test relies on CWD, not file location):
+    .venv/bin/python tests/test_deepinfra_smoke.py
 """
 import os
 import sys
